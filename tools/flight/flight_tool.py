@@ -1,181 +1,49 @@
-"""
-OpenSky Network Flight Data Function for AI Agent Function Calling
-
-This module provides a function suitable for AI agent function calling that
-retrieves flight data from the OpenSky Network API based on flight number.
-"""
-
-import os
-import json
-from typing import Dict, Any
-from datetime import datetime, timedelta
 import requests
-#from tools.flight.relative_location_tool import get_location_with_type
+import sys
+from tools.flight.relative_location_tool import get_location_with_type
 
-time_window_hours = 48
+ENDPOINT = "https://opendata.adsb.fi/api/v2/callsign/{callsign}"
+TIMEOUT  = 10          # seconds
+CALLSIGN = "N718FX"    # remplacez par le callsign de votre choix
 
 
-def get_flight_data_by_callsign(
-    flight_number: str
-) -> Dict[str, Any]:
-    
-    # Clean up the flight number (remove spaces, convert to uppercase)
-    callsign = flight_number.strip().upper()
+def get_flight_data_by_callsign(callsign: str) -> dict | None:
+    url = ENDPOINT.format(callsign=callsign)
+    try:
+        resp = requests.get(url, timeout=TIMEOUT)
+    except requests.RequestException as exc:
+        sys.stderr.write(f"[Erreur réseau] {exc}\n")
+        return None
+
+    if resp.status_code != 200:
+        sys.stderr.write(f"[HTTP {resp.status_code}] {resp.reason}\n")
+        return None
 
     try:
-        # Step 1: Search for current state vectors with the callsign
-        base_url = "https://opensky-network.org/api/states/all"
+        data = resp.json()
+    except ValueError:
+        sys.stderr.write("[Erreur] Réponse non-JSON\n")
+        return None
 
-        # Prepare authentication if provided
-        headers = {
-            "Accept": "application/json",
-            "Authorization": "Bearer {}".format(os.getenv("TOKEN_OPENSKY"))
-        }
+    if not data.get("ac"):
+        sys.stderr.write("[Info] Aucun aéronef actif pour ce callsign\n")
+        return None
+    
+    latitude, longitude = data["ac"][0]["lat"], data["ac"][0]["lon"]
+    flying_over = get_location_with_type(latitude, longitude)
+
+    return {"flying_over": flying_over} | data
 
 
-        # Make request to get current states
-        response = requests.get(base_url, headers=headers, timeout=30)
-        response.raise_for_status()
-
-        states_data = response.json()
-
-        # Find flights matching the callsign
-        matching_flights = []
-        if states_data.get('states'):
-            for state in states_data['states']:
-                if state[1] and callsign in state[1].strip().upper():
-                    matching_flights.append(state)
-
-        if not matching_flights:
-            # Step 2: If no current flights found, search historical data
-            end_time = int(datetime.now().timestamp())
-            begin_time = int((datetime.now() - timedelta(hours=time_window_hours)).timestamp())
-
-            # Try to find historical flights with this callsign
-            flights_url = "https://opensky-network.org/api/flights/all"
-            params = {
-                'begin': begin_time,
-                'end': end_time
-            }
-
-            hist_response = requests.get(flights_url, params=params, headers=headers, timeout=30)
-
-            historical_flights = []
-            if hist_response.status_code == 200:
-                hist_data = hist_response.json()
-                if hist_data:
-                    for flight in hist_data:
-                        if flight.get('callsign') and callsign in flight['callsign'].strip().upper():
-                            historical_flights.append({
-                                'callsign': flight.get('callsign'),
-                                'icao24': flight.get('icao24'),
-                                'departure_airport': flight.get('estDepartureAirport'),
-                                'arrival_airport': flight.get('estArrivalAirport'),
-                                'first_seen': flight.get('firstSeen'),
-                                'last_seen': flight.get('lastSeen')
-                            })
-
-            return {
-                "flight_found": False,
-                "callsign": callsign,
-                "message": f"No current flights found for {callsign}",
-                "historical_flights": historical_flights,
-                "search_time_window_hours": time_window_hours,
-                "error": None
-            }
-
-        # Process the first matching flight
-        flight_state = matching_flights[0]
-        icao24 = flight_state[0]
-        found_callsign = flight_state[1].strip() if flight_state[1] else callsign
-
-        # Step 3: Get additional flight information using ICAO24
-        end_time = int(datetime.now().timestamp())
-        begin_time = int((datetime.now() - timedelta(hours=time_window_hours)).timestamp())
-
-        flights_url = "https://opensky-network.org/api/flights/aircraft"
-        params = {
-            'icao24': icao24,
-            'begin': begin_time,
-            'end': end_time
-        }
-
-        hist_response = requests.get(flights_url, params=params,headers=headers, timeout=30)
-        historical_flights = []
-
-        if hist_response.status_code == 200:
-            hist_data = hist_response.json()
-            if hist_data:
-                for flight in hist_data:
-                    historical_flights.append({
-                        'callsign': flight.get('callsign'),
-                        'departure_airport': flight.get('estDepartureAirport'),
-                        'arrival_airport': flight.get('estArrivalAirport'),
-                        'first_seen': flight.get('firstSeen'),
-                        'last_seen': flight.get('lastSeen'),
-                        'departure_time': datetime.fromtimestamp(flight['firstSeen']).isoformat() if flight.get('firstSeen') else None,
-                        'arrival_time': datetime.fromtimestamp(flight['lastSeen']).isoformat() if flight.get('lastSeen') else None
-                    })
-
-        concrete_location = get_location_with_type(flight_state[6], flight_state[5])
-
-        # Format the comprehensive response
-        result = {
-            "flight_found": True,
-            "callsign": found_callsign,
-            "icao24": icao24,
-            "current_position": {
-                "latitude": flight_state[6],
-                "longitude": flight_state[5],
-                "altitude_meters": flight_state[7],
-                "geometric_altitude_meters": flight_state[13],
-                "on_ground": flight_state[8],
-                "concrete_location": concrete_location
-            },
-            "velocity_info": {
-                "velocity_ms": flight_state[9],
-                "true_track_degrees": flight_state[10],
-                "vertical_rate_ms": flight_state[11]
-            },
-            "aircraft_info": {
-                "origin_country": flight_state[2],
-                "squawk": flight_state[14],
-                "spi": flight_state[15],
-                "position_source": flight_state[16]
-            },
-            "timestamps": {
-                "last_contact": flight_state[4],
-                "time_position": flight_state[3],
-                "last_contact_datetime": datetime.fromtimestamp(flight_state[4]).isoformat() if flight_state[4] else None,
-                "time_position_datetime": datetime.fromtimestamp(flight_state[3]).isoformat() if flight_state[3] else None
-            },
-            "historical_flights": historical_flights,
-            "search_time_window_hours": time_window_hours,
-            "api_timestamp": states_data.get('time'),
-            "total_matching_flights": len(matching_flights),
-            "error": None
-        }
-
-        return result
-
-    except requests.RequestException as e:
-        return {
-            "flight_found": False,
-            "callsign": callsign,
-            "error": f"API request failed: {str(e)}",
-            "error_type": "network_error"
-        }
-    except Exception as e:
-        return {
-            "flight_found": False,
-            "callsign": callsign,
-            "error": f"Unexpected error: {str(e)}",
-            "error_type": "general_error"
-        }
+if __name__ == "__main__":
+    result = get_flight_data_by_callsign(CALLSIGN)
+    if result:
+        # Affiche le premier enregistrement trouvé
+        print(result["ac"][0])
 
 
 # JSON Schema for AI Function Calling
-FLIGHT_DATA_FUNCTION_SCHEMA = {
+FETCH_FLIGHT_BY_CALLSIGN_TOOL_DEFINITION = {
     "type": "function",
     "function": {
         "name": "get_flight_data_by_callsign",
@@ -183,26 +51,13 @@ FLIGHT_DATA_FUNCTION_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "flight_number": {
+                "callsign": {
                     "type": "string",
                     "description": "The flight number or callsign to search for (e.g., 'DLH441', 'UAL123', 'AF1234'). Can be with or without airline prefix."
                 }
             },
-            "required": ["flight_number"],
+            "required": ["callsign"],
             "additionalProperties": False
         }
     }
 }
-
-if __name__ == "__main__":
-    # Example usage
-    print("OpenSky Flight Data Function")
-    print("=" * 40)
-
-    # Test with a sample flight number
-    result1 = get_flight_data_by_callsign("TVF67NZ")
-    print("Sample call result:")
-    print(json.dumps(result1, indent=2))
-
-    # print("\nFunction schema for AI agents:")
-    # print(json.dumps(FLIGHT_DATA_FUNCTION_SCHEMA, indent=2))
