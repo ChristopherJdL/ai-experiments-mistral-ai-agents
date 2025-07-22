@@ -20,7 +20,6 @@ recent_conversation_id = None
 
 while True:
     inp = input(">")
-    #under the hood prompt enhancement.
     
     if first_start:
         response = client.beta.conversations.start(
