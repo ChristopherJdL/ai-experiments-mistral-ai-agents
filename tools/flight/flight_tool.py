@@ -1,5 +1,5 @@
-import requests
 import sys
+import requests
 from tools.flight.relative_location_tool import get_location_with_type
 
 ENDPOINT = "https://opendata.adsb.fi/api/v2/callsign/{callsign}"
@@ -11,18 +11,17 @@ def get_flight_data_by_callsign(callsign: str) -> dict | None:
     url = ENDPOINT.format(callsign=callsign)
     try:
         resp = requests.get(url, timeout=TIMEOUT)
-    except requests.RequestException as exc:
-        sys.stderr.write(f"[Erreur réseau] {exc}\n")
-        return None
+    except requests.RequestException:
+        return {"error": "internal error occurred."}
 
     if resp.status_code != 200:
         sys.stderr.write(f"[HTTP {resp.status_code}] {resp.reason}\n")
-        return None
+        return {"error": "non-ok HTTP response code."}
 
     try:
         data = resp.json()
     except ValueError:
-        sys.stderr.write("[Erreur] Réponse non-JSON\n")
+        sys.stderr.write("[Error] JSON Parsing Error\n")
         return None
 
     if not data.get("ac"):
